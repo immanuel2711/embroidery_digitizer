@@ -15,6 +15,8 @@ def generate_dst_from_image(image_path, dst_output_path, resize_to=(300, 300), m
         print("❌ Failed to load image.")
         return False
 
+    print("📂 Image loaded successfully.")
+
     img = cv2.resize(img, resize_to)
 
     # 2. Convert to grayscale
@@ -33,12 +35,22 @@ def generate_dst_from_image(image_path, dst_output_path, resize_to=(300, 300), m
     # 5. Find all contours (including holes)
     contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
 
+    # 5.1 Optional: sort contours by proximity to reduce stitch travel
+    def contour_centroid(contour):
+        M = cv2.moments(contour)
+        if M["m00"] == 0:
+            return (0, 0)
+        return (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+
+    contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
+    contours = sorted(contours, key=lambda c: contour_centroid(c))
+
+    print(f"✂️ Total valid contours: {len(contours)}")
+
     pattern = EmbPattern()
+    current_x, current_y = 0, 0
 
     for contour in contours:
-        if cv2.contourArea(contour) < min_area:
-            continue  # Skip noise
-
         # 6. Smooth contour
         contour = smooth_contour(contour, epsilon_ratio=0.001)
         points = contour.squeeze()
@@ -46,14 +58,23 @@ def generate_dst_from_image(image_path, dst_output_path, resize_to=(300, 300), m
         if len(points.shape) != 2 or len(points) < 5:
             continue
 
-        # 7. Begin stitching with a jump
+        # 7. Begin stitching with a jump only if far from previous
         start = points[0]
-        pattern.add_stitch_absolute(JUMP, int(start[0]), int(start[1]))
-        pattern.add_stitch_absolute(STITCH, int(start[0]), int(start[1]))
+        start_x, start_y = int(start[0]), int(start[1])
+
+        # Distance threshold to decide jump
+        distance = np.linalg.norm(np.array([current_x, current_y]) - np.array([start_x, start_y]))
+        if distance > 10:  # threshold in pixels
+            pattern.add_command(2)  # STOP (breaks long jump line in viewer)
+            pattern.add_stitch_absolute(JUMP, start_x, start_y)
+        pattern.add_stitch_absolute(STITCH, start_x, start_y)
 
         for pt in points[1:]:
             x, y = int(pt[0]), int(pt[1])
             pattern.add_stitch_absolute(STITCH, x, y)
+
+        # Update current needle position
+        current_x, current_y = x, y
 
     # 8. End pattern
     pattern.end()
